@@ -40,6 +40,8 @@ namespace catapult { namespace local {
 		constexpr auto Nemesis_Chain_Score = static_cast<uint64_t>(1);
 
 		bool HasPreviousExecution(const cache::CatapultCache& cache) {
+			CATAPULT_LOG(warning) << "CACHE SIZE " << cache.createView().sub<cache::AccountStateCache>().size();
+
 			// assume a previous execution if the account state cache is not empty
 			// (this needs to be checked in order to prevent reexecution, which can lead to hash cache insert error)
 			return 0 != cache.createView().sub<cache::AccountStateCache>().size();
@@ -92,7 +94,7 @@ namespace catapult { namespace local {
 	void NemesisBlockNotifier::raise(const consumer<model::BlockElement>& action) {
 		// bypass if chain has advanced past nemesis and/or appears to have been previously executed
 		auto storageView = m_storage.view();
-		if (Nemesis_Height != storageView.chainHeight() || HasPreviousExecution(m_cache))
+		if (/*Nemesis_Height != storageView.chainHeight() || */HasPreviousExecution(m_cache))
 			CATAPULT_THROW_RUNTIME_ERROR("NemesisBlockNotifier can only be called during first boot");
 
 		auto pNemesisBlockElement = storageView.loadBlockElement(Nemesis_Height);

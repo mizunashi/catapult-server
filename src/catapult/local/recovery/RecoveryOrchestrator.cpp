@@ -28,6 +28,8 @@
 #include "RepairState.h"
 #include "StateChangeRepairingSubscriber.h"
 #include "StorageStart.h"
+#include "catapult/local/server/FileStateChangeStorage.h"
+#include "catapult/local/server/NemesisBlockNotifier.h"
 #include "catapult/cache/ReadOnlyCatapultCache.h"
 #include "catapult/cache_core/BlockStatisticCache.h"
 #include "catapult/chain/BlockExecutor.h"
@@ -35,6 +37,7 @@
 #include "catapult/extensions/LocalNodeChainScore.h"
 #include "catapult/extensions/LocalNodeStateFileStorage.h"
 #include "catapult/extensions/LocalNodeStateRef.h"
+#include "catapult/extensions/NemesisBlockLoader.h"
 #include "catapult/extensions/ProcessBootstrapper.h"
 #include "catapult/io/BlockStorageCache.h"
 #include "catapult/io/FilesystemUtils.h"
@@ -46,6 +49,7 @@
 #include "catapult/subscribers/FinalizationReader.h"
 #include "catapult/subscribers/TransactionStatusReader.h"
 #include "catapult/utils/StackLogger.h"
+#include "extensions/finalization/src/io/FileProofStorage.h"
 
 namespace catapult { namespace local {
 
@@ -77,6 +81,8 @@ namespace catapult { namespace local {
 
 		// endregion
 
+		// region utils
+
 		std::unique_ptr<io::PrunableBlockStorage> CreateStagingBlockStorage(const config::CatapultDataDirectory& dataDirectory) {
 			auto stagingDirectory = dataDirectory.spoolDir("block_recover").str();
 			config::CatapultDirectory(stagingDirectory).create();
@@ -103,7 +109,26 @@ namespace catapult { namespace local {
 			return startHeight;
 		}
 
+		// endregion
+
+		// region DefaultRecoveryOrchestrator
+
+		namespace {
+			std::unique_ptr<subscribers::StateChangeSubscriber> CreateStateChangeSubscriber(
+					subscribers::SubscriptionManager& subscriptionManager,
+					const cache::CatapultCache& catapultCache,
+					const config::CatapultDataDirectory& dataDirectory) {
+				subscriptionManager.addStateChangeSubscriber(CreateFileStateChangeStorage(
+						std::make_unique<io::FileQueueWriter>(dataDirectory.spoolDir("state_change").str(), "index_server.dat"),
+						[&catapultCache]() { return catapultCache.changesStorages(); }));
+				return subscriptionManager.createStateChangeSubscriber();
+			}
+		}
+
 		class DefaultRecoveryOrchestrator final : public RecoveryOrchestrator {
+		private:
+			enum class StateRecoveryMode { None, Repair, Reseed };
+
 		public:
 			explicit DefaultRecoveryOrchestrator(std::unique_ptr<extensions::ProcessBootstrapper>&& pBootstrapper)
 					: m_pBootstrapper(std::move(pBootstrapper))
@@ -113,7 +138,10 @@ namespace catapult { namespace local {
 					, m_pBlockStorage(m_pBootstrapper->subscriptionManager().createBlockStorage(m_pBlockChangeSubscriber))
 					, m_storage(CreateReadOnlyStorageAdapter(*m_pBlockStorage), CreateStagingBlockStorage(m_dataDirectory))
 					, m_pFinalizationSubscriber(m_pBootstrapper->subscriptionManager().createFinalizationSubscriber())
-					, m_pStateChangeSubscriber(m_pBootstrapper->subscriptionManager().createStateChangeSubscriber())
+					, m_pStateChangeSubscriber(CreateStateChangeSubscriber(
+							m_pBootstrapper->subscriptionManager(),
+							m_catapultCache,
+							m_dataDirectory))
 					, m_pTransactionStatusSubscriber(m_pBootstrapper->subscriptionManager().createTransactionStatusSubscriber())
 					, m_pluginManager(m_pBootstrapper->pluginManager())
 					, m_stateSavingRequired(true)
@@ -149,17 +177,51 @@ namespace catapult { namespace local {
 				repairSubscribers();
 
 				CATAPULT_LOG(info) << "loading state";
-				auto heights = extensions::LoadStateFromDirectory(m_dataDirectory.dir("state"), stateRef(), m_pluginManager);
-				if (heights.Cache > heights.Storage)
-					CATAPULT_THROW_RUNTIME_ERROR_2("cache height is larger than storage height", heights.Cache, heights.Storage);
+				auto heights = extensions::HasSerializedState(m_dataDirectory.dir("state"))
+						? extensions::LoadStateFromDirectory(m_dataDirectory.dir("state"), stateRef(), m_pluginManager)
+						: extensions::StateHeights{ Height(1), m_storage.view().chainHeight() };
+				auto stateRecoveryMode = calculateStateRecoveryMode(heights);
 
-				if (!stateRef().Config.Node.EnableCacheDatabaseStorage || Height(1) == heights.Cache)
+				if (StateRecoveryMode::Reseed == stateRecoveryMode) {
+					// nemesis notification
+					NemesisBlockNotifier notifier(m_config.BlockChain, m_catapultCache, m_storage, m_pluginManager);
+
+					if (m_pBlockChangeSubscriber)
+						notifier.raise(*m_pBlockChangeSubscriber);
+
+					notifier.raise(*m_pFinalizationSubscriber);
+					notifier.raise(*m_pStateChangeSubscriber);
+
+					// nemesis loader
+					{
+						auto cacheDelta = m_catapultCache.createDelta();
+						extensions::NemesisBlockLoader loader(cacheDelta, m_pluginManager, m_pluginManager.createObserver());
+						loader.executeAndCommit(stateRef(), extensions::StateHashVerification::Enabled);
+						stateRef().Score += model::ChainScore(1); // set chain score to 1 after processing nemesis
+					}
+
+					// load rest of change
+					repairStateFromStorage(heights, [this](auto&& loadedBlockStatus) {
+						m_pBlockChangeSubscriber->notifyBlock(loadedBlockStatus.BlockElement);
+						m_pStateChangeSubscriber->notifyScoreChange(loadedBlockStatus.ChainScore);
+						m_pStateChangeSubscriber->notifyStateChange(loadedBlockStatus.StateChangeInfo);
+					});
+
+					std::filesystem::copy(
+							m_dataDirectory.spoolDir("state_change").file("index_server.dat"),
+							m_dataDirectory.spoolDir("state_change").file("index.dat"));
+
+					reseedFinalizationNotifications();
+				} else if (StateRecoveryMode::Repair == stateRecoveryMode) {
 					repairStateFromStorage(heights);
+				}
 
 				CATAPULT_LOG(info) << "loaded block chain (height = " << heights.Storage << ", score = " << m_score.get() << ")";
 
-				CATAPULT_LOG(info) << "repairing state";
-				repairState(systemState.commitStep());
+				if (StateRecoveryMode::Reseed != stateRecoveryMode) {
+					CATAPULT_LOG(info) << "repairing state";
+					repairState(systemState.commitStep());
+				}
 
 				CATAPULT_LOG(info) << "finalizing";
 				systemState.reset();
@@ -182,7 +244,25 @@ namespace catapult { namespace local {
 						readNextMessage);
 			}
 
-			void repairStateFromStorage(const extensions::StateHeights& heights) {
+			StateRecoveryMode calculateStateRecoveryMode(const extensions::StateHeights& heights) {
+				if (heights.Cache == heights.Storage)
+					return StateRecoveryMode::None;
+
+				if (Height(1) == heights.Cache)
+					return StateRecoveryMode::Reseed;
+
+				if (!stateRef().Config.Node.EnableCacheDatabaseStorage && heights.Cache > heights.Storage) {
+					std::ostringstream out;
+					out << "cache height (" << heights.Cache << ")" << " is greater than storage height (" << heights.Storage << ")";
+					CATAPULT_THROW_RUNTIME_ERROR(out.str().c_str());
+				}
+
+				return stateRef().Config.Node.EnableCacheDatabaseStorage ? StateRecoveryMode::None : StateRecoveryMode::Repair;
+			}
+
+			void repairStateFromStorage(
+					const extensions::StateHeights& heights,
+					const consumer<LoadedBlockStatus&&>& statusConsumer = consumer<LoadedBlockStatus&&>()) {
 				if (heights.Cache == heights.Storage)
 					return;
 
@@ -190,8 +270,24 @@ namespace catapult { namespace local {
 				// discontinuities in block analysis (e.g. statistic cache expects consecutive blocks)
 				CATAPULT_LOG(info) << "loading state - block loading required";
 				auto observerFactory = [&pluginManager = m_pluginManager](const auto&) { return pluginManager.createObserver(); };
-				auto partialScore = LoadBlockChain(observerFactory, m_pluginManager, stateRef(), heights.Cache + Height(1));
+
+				auto partialScore = LoadBlockChain(
+						observerFactory,
+						m_pluginManager,
+						stateRef(),
+						heights.Cache + Height(1),
+						statusConsumer);
 				m_score += partialScore;
+			}
+
+			void reseedFinalizationNotifications() {
+				io::FileProofStorage proofStorage(m_config.User.DataDirectory);
+
+				auto lastProofEpoch = proofStorage.statistics().Round.Epoch;
+				for (auto epoch = FinalizationEpoch(1); epoch <= lastProofEpoch; epoch = epoch + FinalizationEpoch(1)) {
+					auto pProof = proofStorage.loadProof(epoch);
+					m_pFinalizationSubscriber->notifyFinalizedBlock(pProof->Round, pProof->Height, pProof->Hash);
+				}
 			}
 
 			void repairState(consumers::CommitOperationStep commitStep) {
@@ -330,6 +426,8 @@ namespace catapult { namespace local {
 			plugins::PluginManager& m_pluginManager;
 			bool m_stateSavingRequired;
 		};
+
+		// endregion
 	}
 
 	std::unique_ptr<RecoveryOrchestrator> CreateRecoveryOrchestrator(std::unique_ptr<extensions::ProcessBootstrapper>&& pBootstrapper) {
