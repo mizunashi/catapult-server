@@ -20,6 +20,7 @@
 **/
 
 #include "catapult/model/FeeUtils.h"
+#include "catapult/model/Block.h"
 #include "catapult/model/Transaction.h"
 #include "tests/TestHarness.h"
 
@@ -55,6 +56,56 @@ namespace catapult { namespace model {
 
 	TEST(TEST_CLASS, CanCalculateTransactionFeeWhenFeeMultiplierIsNonzero_32BitOverflow) {
 		AssertCanCalculateTransactionFee(842, BlockFeeMultiplier(15134406), Amount(842ull * 15134406));
+	}
+
+	// endregion
+
+	// region CalculateTransactionFee(BlockHeader)
+
+	namespace {
+		class CalculateTransactionFeeOverflowFixHeightGuard {
+		public:
+			explicit CalculateTransactionFeeOverflowFixHeightGuard(Height height) {
+				SetCalculateTransactionFeeOverflowFixHeight(height);
+			}
+
+			~CalculateTransactionFeeOverflowFixHeightGuard() {
+				SetCalculateTransactionFeeOverflowFixHeight(Height());
+			}
+		};
+
+		void AssertCanCalculateTransactionFee(uint32_t size, BlockFeeMultiplier multiplier, Height height, Amount expectedFee) {
+			// Arrange:
+			Transaction transaction;
+			transaction.Size = size;
+
+			BlockHeader blockHeader;
+			blockHeader.Height = height;
+			blockHeader.FeeMultiplier = multiplier;
+
+			// Act:
+			auto fee = CalculateTransactionFee(blockHeader, transaction);
+
+			// Assert:
+			EXPECT_EQ(expectedFee, fee) << "size = " << size << ", multiplier = " << multiplier << ", height = " << height;
+		}
+	}
+
+	TEST(TEST_CLASS, CalculateTransactionFee_BlockHeader_RespectsForkHeight) {
+		// Arrange:
+		CalculateTransactionFeeOverflowFixHeightGuard fixHeightGuard(Height(100));
+
+		// Sanity:
+		auto feeWithOverflow = Amount(static_cast<uint32_t>(842) * 15134406);
+		auto feeWithoutOverflow = Amount(842ull * 15134406);
+		EXPECT_LT(feeWithOverflow, feeWithoutOverflow);
+
+		// Act + Assert:
+		for (auto height : { Height(0), Height(98), Height(99) })
+			AssertCanCalculateTransactionFee(842, BlockFeeMultiplier(15134406), height, feeWithOverflow);
+
+		for (auto height : { Height(100), Height(101), Height(200) })
+			AssertCanCalculateTransactionFee(842, BlockFeeMultiplier(15134406), height, feeWithoutOverflow);
 	}
 
 	// endregion

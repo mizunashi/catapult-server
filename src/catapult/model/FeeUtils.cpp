@@ -20,12 +20,32 @@
 **/
 
 #include "FeeUtils.h"
+#include "Block.h"
 #include "Transaction.h"
 
 namespace catapult { namespace model {
 
+	namespace {
+		Height g_calculateTransactionFeeOverflowFixHeight;
+
+		Amount CalculateTransactionFee_V1(BlockFeeMultiplier feeMultiplier, const Transaction& transaction) {
+			return Amount(feeMultiplier.unwrap() * transaction.Size);
+		}
+	}
+
+	void SetCalculateTransactionFeeOverflowFixHeight(Height height) {
+		g_calculateTransactionFeeOverflowFixHeight = height;
+	}
+
 	Amount CalculateTransactionFee(BlockFeeMultiplier feeMultiplier, const Transaction& transaction) {
 		return Amount(static_cast<uint64_t>(feeMultiplier.unwrap()) * transaction.Size);
+	}
+
+	Amount CalculateTransactionFee(const model::BlockHeader& blockHeader, const Transaction& transaction) {
+		if (blockHeader.Height >= g_calculateTransactionFeeOverflowFixHeight)
+			return CalculateTransactionFee(blockHeader.FeeMultiplier, transaction);
+		else
+			return CalculateTransactionFee_V1(blockHeader.FeeMultiplier, transaction);
 	}
 
 	BlockFeeMultiplier CalculateTransactionMaxFeeMultiplier(const Transaction& transaction) {

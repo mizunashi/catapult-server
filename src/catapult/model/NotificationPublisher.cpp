@@ -138,7 +138,7 @@ namespace catapult { namespace model {
 				sub.notify(EntityNotification(transaction.Network, transaction.Version, attributes.MinVersion, attributes.MaxVersion));
 
 				// raise transaction notifications
-				auto fee = pBlockHeader ? CalculateTransactionFee(pBlockHeader->FeeMultiplier, transaction) : transaction.MaxFee;
+				auto fee = pBlockHeader ? CalculateTransactionFee(*pBlockHeader, transaction) : transaction.MaxFee;
 				CATAPULT_LOG(trace)
 						<< "[Transaction Fee Info]" << std::endl
 						<< "+       pBlockHeader: " << !!pBlockHeader << std::endl

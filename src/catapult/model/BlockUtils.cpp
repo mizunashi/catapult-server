@@ -65,7 +65,7 @@ namespace catapult { namespace model {
 		ExtendedBlockTransactionsInfo CalculateBlockTransactionsInfo(const Block& block, const TransactionRegistry* pTransactionRegistry) {
 			ExtendedBlockTransactionsInfo blockTransactionsInfo;
 			for (const auto& transaction : block.Transactions()) {
-				auto transactionFee = CalculateTransactionFee(block.FeeMultiplier, transaction);
+				auto transactionFee = CalculateTransactionFee(block, transaction);
 				blockTransactionsInfo.TotalFee = blockTransactionsInfo.TotalFee + transactionFee;
 				++blockTransactionsInfo.Count;
 

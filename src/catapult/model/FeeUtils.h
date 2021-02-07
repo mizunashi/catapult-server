@@ -22,12 +22,24 @@
 #pragma once
 #include "catapult/types.h"
 
-namespace catapult { namespace model { struct Transaction; } }
+namespace catapult {
+	namespace model {
+		struct BlockHeader;
+		struct Transaction;
+	}
+}
 
 namespace catapult { namespace model {
 
+	/// Sets the \a height at which the overflow in `CalculateTransactionFee` should be fixed.
+	/// \note This only applies to the overload that accepts a block header.
+	void SetCalculateTransactionFeeOverflowFixHeight(Height height);
+
 	/// Calculates the fee for \a transaction contained in block with \a feeMultiplier.
 	Amount CalculateTransactionFee(BlockFeeMultiplier feeMultiplier, const Transaction& transaction);
+
+	/// Calculates the fee for \a transaction contained in block with \a blockHeader.
+	Amount CalculateTransactionFee(const model::BlockHeader& blockHeader, const Transaction& transaction);
 
 	/// Calculates the maximum fee multiplier for \a transaction.
 	BlockFeeMultiplier CalculateTransactionMaxFeeMultiplier(const Transaction& transaction);

@@ -40,6 +40,7 @@
 #include "catapult/io/FilesystemUtils.h"
 #include "catapult/ionet/NodeContainer.h"
 #include "catapult/local/HostUtils.h"
+#include "catapult/model/FeeUtils.h"
 #include "catapult/utils/StackLogger.h"
 
 namespace catapult { namespace local {
@@ -214,6 +215,9 @@ namespace catapult { namespace local {
 					, m_isBooted(false) {
 				ValidateNodes(m_pBootstrapper->staticNodes());
 				AddLocalNode(m_nodes, m_pBootstrapper->config());
+
+				// set forks
+				model::SetCalculateTransactionFeeOverflowFixHeight(m_config.BlockChain.ForkHeights.CalculateTransactionFeeOverflowFix);
 			}
 
 			~DefaultLocalNode() override {
