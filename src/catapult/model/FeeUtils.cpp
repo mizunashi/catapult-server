@@ -26,7 +26,7 @@
 namespace catapult { namespace model {
 
 	namespace {
-		Height g_calculateTransactionFeeOverflowFixHeight;
+		Height g_calculateTransactionFeeOverflowFixHeight = Height(115500);
 
 		Amount CalculateTransactionFee_V1(BlockFeeMultiplier feeMultiplier, const Transaction& transaction) {
 			return Amount(feeMultiplier.unwrap() * transaction.Size);
